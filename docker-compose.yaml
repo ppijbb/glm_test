@@ -1,0 +1,171 @@
+version: "3.10"
+volumes:
+    nvidia_mps:
+        driver_opts:
+            type: tmpfs
+            device: tmpfs
+    elasticsearch-data:
+    filebeat-data:
+
+networks:
+    # default:
+    #   external: true
+    #   driver: bridge
+    llmservice-network:
+        driver: bridge
+
+services:
+    # mps-daemon:
+    #   image: nvidia/mps
+    #   container_name: mps-daemon
+    #   ipc: shareable
+    #   volumes:
+    #     - nvidia_mps:/tmp/nvidia-mps
+    #   environment:
+    #     - NVIDIA_VISIBLE_DEVICES=1,2
+    #   runtime: nvidia
+    #   init: true
+
+    llm-engine:
+        shm_size: 32gb
+        ipc: host
+        build:
+            context: .
+            dockerfile: Dockerfile
+        image: vllm-glm47flash:latest
+        container_name: llm-engine
+        runtime: nvidia
+        ports:
+           - "8501:8501"
+        volumes:
+            - /home/conan/.cache:/root/.cache/
+            - /user/conan/hf/hub:/root/.cache/huggingface/hub
+            # - ./dist-packages:/opt/dist-packages
+        environment:
+            # - PYTHONPATH=/opt/dist-packages
+            - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
+            - VLLM_API_KEY=EMPTY
+            - VLLM_FLASH_ATTN_VERSION=2
+            - VLLM_ATTENTION_BACKEND=TRITON_ATTN
+            - VLLM_USE_V1=1
+            - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+            - TOKENIZERS_PARALLELISM=true
+            - MAX_JOBS=2
+        command: >
+            --model "QuantTrio/GLM-4.7-Flash-AWQ"
+            --served-model-name dcai_llm
+            --port 8501
+            --dtype float16
+            --trust-remote-code
+            --quantization awq
+            --gpu-memory-utilization 0.95
+            --max-model-len 2048
+            --tensor-parallel-size 1
+            --max-num-seqs 2
+            --max-num-batched-tokens 256
+            --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":1}"
+            --tool-call-parser glm47 
+            --reasoning-parser glm45
+           # --enforce-eager
+           # --enable-prefix-caching
+           # --speculative-config "{\"method\": \"ngram\", \"num_speculative_tokens\": 1}"
+           # --kv-transfer-config "{\"kv_connector\":\"LMCacheConnectorV1\", \"kv_role\":\"kv_both\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"lmcache\", \"lmcache.mp.port\": 14579}}"
+           # --speculative-config "{\"method\": \"eagle\", \"model\": \"yuhuili/EAGLE3-LLaMA3.1-Instruct-8B\", \"num_speculative_tokens\": 8, \"prompt_lookup_max\": 16}"
+           # --speculative-config "{\"method\": \"draft_model\", \"model\": \"google/gemma-3-1b-it\", \"num_speculative_tokens\": 3, \"max_model_len\": 20000, \"disable_padded_drafter_batch\": true}"
+        deploy:
+            resources:
+                limits:
+                    cpus: "4"
+                    memory: 64gb
+                reservations:
+                    cpus: "2"
+                    memory: 8gb
+                    devices:
+                      - driver: nvidia
+                        device_ids: ["0"] # "count"와 "device_ids"를 동시에 쓸 수 없음. 필요한 GPU만 명시.
+                        capabilities: [gpu]
+        depends_on:
+            - lmcache # lmcache가 먼저 떠야 함
+        networks:
+            - llmservice-network
+
+    # llm-engine:
+    #     shm_size: 32gb
+    #     ipc: host
+    #     image: lmsysorg/sglang:latest
+    #     container_name: llm-engine
+    #     runtime: nvidia
+    #     volumes:
+    #         - /home/conan/.cache:/root/.cache/
+    #         - /user/conan/hf/hub:/root/.cache/huggingface/hub
+    #     environment:
+    #         - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
+    #         - VLLM_API_KEY=EMPTY
+    #        # - VLLM_FLASH_ATTN_VERSION=2
+    #        # - VLLM_ATTENTION_BACKEND=TRITON_ATTN
+    #         - VLLM_USE_V1=1
+    #         - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    #         - TOKENIZERS_PARALLELISM=true
+    #         - MAX_JOBS=2
+    #     command: >
+    #         python -m sglang.launch_server
+    #           --host 0.0.0.0
+    #           --port 8000
+    #           --model-path pytorch/gemma-3-27b-it-AWQ-INT4
+    #           --dtype bfloat16
+    #           --quantization awq
+    #           --enable-multimodal
+    #           --max-total-tokens 32768
+    #           --max-prefill-tokens 1
+    #           --tensor-parallel-size 1
+    #           --mem-fraction-static 0.8
+    #           --attention-backend triton
+    #           --kv-cache-dtype fp8_e4m3
+    #           --cuda-graph-max-bs 8
+    #           --speculative-algorithm STANDALONE
+    #           --speculative-draft-model-path Gunulhona/Gemma-3-4B-AWQ-INT4
+    #           --speculative-num-steps 3
+    #           --speculative-eagle-topk 4
+    #           --speculative-num-draft-tokens 16
+    #     deploy:
+    #         resources:
+    #             limits:
+    #                 cpus: "4"
+    #                 memory: 64gb
+    #             reservations:
+    #                 cpus: "2"
+    #                 memory: 8gb
+    #                 devices:
+    #                     - driver: nvidia
+    #                      # count: all # tensor-parallel-size 2라서 GPU 2개 이상 필요
+    #                       device_ids: ["0"]
+    #                       capabilities: [gpu]
+    #     depends_on:
+    #         - lmcache # lmcache가 먼저 떠야 함
+    #     networks:
+    #         - llmservice-network
+    
+    # lmcache:
+    #     shm_size: 32gb
+    #     deploy:
+    #         resources:
+    #             limits:
+    #                 cpus: "16"
+    #                 memory: 128gb
+    #     image: lmcache/vllm-openai:latest # 이미지가 맞는지 확인 필요 (requirements에 lmcache 추가해서 빌드해야 함)
+    #     container_name: lmcache
+    #     env_file:
+    #         - .env
+    #     environment:
+    #         - LMCACHE_MAX_LOCAL_CPU_SIZE=50.0
+    #     runtime: nvidia
+    #     ports:
+    #         - "14579:14579"
+    #     networks:
+    #         - llmservice-network
+    #     entrypoint:
+    #         - /bin/bash
+    #         - -c
+    #     command:
+    #         - |
+    #             lmcache_server 0.0.0.0 14579 cpu
